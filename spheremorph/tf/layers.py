@@ -5,6 +5,7 @@ tensorflow/keras layers for spheremorph
 import keras.backend as K
 import keras.layers as KL
 import neurite as ne
+import numpy as np
 import tensorflow as tf
 from keras.layers import Layer
 
@@ -167,6 +168,13 @@ class ConcatWithPositionalEncoding(KL.Layer):
 
     def compute_output_shape(self, input_shape, **kwargs):
         return input_shape[0:-1] + (input_shape[-1] + 2 * self.npos,)
+
+
+def Stack(axis=-1, **kwargs):
+    def stack_func(x):
+        return K.stack(x, axis=axis)
+
+    return KL.Lambda(stack_func, **kwargs)
 
 
 # functional interface of LossEndPoint layer
