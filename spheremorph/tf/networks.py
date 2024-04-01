@@ -295,6 +295,7 @@ class JointSphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
                  metric_name=None,
                  is_bidir=True,
                  int_steps=7,
+                 int_method='ss',
                  pad_size=0,
                  pos_enc=0,
                  is_semi=False,
@@ -303,6 +304,7 @@ class JointSphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
                  is_isw=True,
                  is_softmax=True,
                  is_jacobian=False,
+                 is_neg_jacobian_filter=True,
                  name='josa',
                  **kwargs):
         """
@@ -321,6 +323,7 @@ class JointSphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
         :param is_isw: whether use different deformation for each input (intra-subject warping)
         :param is_softmax: whether to use softmax for prob/onehot output
         :param is_jacobian: whether to use jacobian regularization
+        :param is_neg_jacobian_filter: whether to filter out negative jacobian values
         :param name: name of the model
         :param kwargs: other arguments for VxmDense
 
@@ -388,12 +391,17 @@ class JointSphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
             vxm_model = vxm.networks.VxmDense(input_cat_shape, nb_unet_features=nb_unet_features,
                                               bidir=True, input_model=vxm_model_input, int_resolution=1, **kwargs)
 
-        pos_flow_0 = vxm_model.references.pos_flow  # big pos flow (subject -> atlas)
-        neg_flow_0 = vxm_model.references.neg_flow  # big neg flow (atlas -> subject)
+        ndims = len(input_cat_shape)
         unet_output = vxm_model.references.unet_model.output
 
-        ndims = len(input_cat_shape)
-        Conv = getattr(KL, 'Conv%dD' % ndims)
+        # compute joint svf and flow from the unet output using SphericalConv2D
+        svf_0 = layers.SphericalConv2D(ndims, kernel_size=3, pad_size=pad_size, is_flow=True, padding='same',
+                                       kernel_initializer=KI.RandomNormal(mean=0.0, stddev=1e-5),
+                                       name=f'svf_0')(unet_output)
+        pos_flow_0 = vxm.layers.VecInt(method=int_method, name=f'pos_flow_0', int_steps=int_steps)(svf_0)
+
+        neg_svf_0 = ne.layers.Negate(name=f'neg_svf_0')(svf_0)
+        neg_flow_0 = vxm.layers.VecInt(method=int_method, name=f'neg_flow_0', int_steps=int_steps)(neg_svf_0)
 
         loss_fn_atlas, loss_fn_big_warp, loss_fn_small_warp, \
             loss_fn_ms, loss_fn_jacobian, loss_fn_subject = \
@@ -440,17 +448,39 @@ class JointSphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
 
         for m in range(num_inputs):
             if is_isw:
-                svf = Conv(ndims, kernel_size=3, padding='same',
-                           kernel_initializer=KI.RandomNormal(mean=0.0, stddev=1e-5),
-                           name=f'svf_{m + 1}')(unet_output)
-                flow = vxm.layers.VecInt(method='ss', name=f'pos_flow_{m + 1}',
+                # individual svf
+                svf = layers.SphericalConv2D(ndims, kernel_size=3, pad_size=pad_size, is_flow=True, padding='same',
+                                             kernel_initializer=KI.RandomNormal(mean=0.0, stddev=1e-5),
+                                             name=f'svf_{m + 1}')(unet_output)
+                # individual flow (for regularization)
+                flow = vxm.layers.VecInt(method=int_method, name=f'pos_flow_{m + 1}',
                                          int_steps=int_steps)(svf)
-                pos_flow_compo = KL.add([pos_flow_0, flow], name=f'pos_flow_compo_{m + 1}')
 
+                # composite svf with svf_0 first
+                pos_svf_compo = KL.add([svf_0, svf], name=f'pos_svf_compo_{m + 1}')
+
+                # then integrate to get the compo flow
+                pos_flow_compo = vxm.layers.VecInt(method=int_method, name=f'pos_flow_compo_{m + 1}',
+                                                   int_steps=int_steps)(pos_svf_compo)
+
+                if is_neg_jacobian_filter:
+                    pos_flow_compo = layers.NegativeJacobianFiltering2D(filter_shape=(2, 2), sigma=0.7,
+                                                                        pad_size=pad_size,
+                                                                        name=f'pos_flow_compo_njf_{m + 1}')(
+                        pos_flow_compo)
+
+                # similarly for neg svf and flow
                 neg_svf = ne.layers.Negate(name=f'neg_svf_{m + 1}')(svf)
-                neg_flow = vxm.layers.VecInt(method='ss', name=f'neg_flow_{m + 1}',
+                neg_flow = vxm.layers.VecInt(method=int_method, name=f'neg_flow_{m + 1}',
                                              int_steps=int_steps)(neg_svf)
-                neg_flow_compo = KL.add([neg_flow_0, neg_flow], name=f'neg_flow_compo_{m + 1}')
+                neg_svf_compo = KL.add([neg_svf_0, neg_svf], name=f'neg_svf_compo_{m + 1}')
+                neg_flow_compo = vxm.layers.VecInt(method=int_method, name=f'neg_flow_compo_{m + 1}',
+                                                   int_steps=int_steps)(neg_svf_compo)
+                if is_neg_jacobian_filter:
+                    neg_flow_compo = layers.NegativeJacobianFiltering2D(filter_shape=(2, 2), sigma=0.7,
+                                                                        pad_size=pad_size,
+                                                                        name=f'neg_flow_compo_njf_{m + 1}')(
+                        neg_flow_compo)
             else:
                 flow = neg_flow = None
                 pos_flow_compo = pos_flow_0
@@ -606,30 +636,22 @@ class JointSphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
         return self.prebuilt_model_predict(a_model, src, is_cat, batch_size)
 
     def warp(self, src, img, flow_type, idx, fill_value=None, batch_size=8):
-        if flow_type not in ['pos', 'to_atlas', 'neg', 'to_subject',
-                             'pos_big', 'pos_small', 'neg_big', 'neg_small']:
-            raise ValueError('flow_type must be one of: pos, to_atlas, neg, to_subject')
+        flow = self.parse_flow_reference(flow_type, idx)
 
         assert idx < self.num_inputs, 'idx must be less than the number of inputs'
 
         if flow_type in ['pos', 'to_atlas']:
             model_warp = self.references.model_warp_to_atlas[idx]
-            flow = self.references.pos_flow_compos[idx]
         elif flow_type in ['neg', 'to_subject']:
             model_warp = self.references.model_warp_to_subject[idx]
-            flow = self.references.neg_flow_compos[idx]
         elif flow_type == 'pos_big':
             model_warp = self.references.model_big_warp_to_atlas
-            flow = self.references.pos_flow_0
         elif flow_type == 'pos_small':
             model_warp = self.references.model_small_warp_to_atlas[idx]
-            flow = self.references.small_pos_flows[idx]
         elif flow_type == 'neg_big':
             model_warp = self.references.model_big_warp_to_subject
-            flow = self.references.neg_flow_0
         elif flow_type == 'neg_small':
             model_warp = self.references.model_small_warp_to_subject[idx]
-            flow = self.references.small_neg_flows[idx]
 
         # cache the model if not done before and the input image shape is the same
         # this avoid building the model every time the function is called
@@ -669,18 +691,33 @@ class JointSphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
 
         return model_warp.predict(data_in, batch_size=batch_size)
 
-    def get_flows(self, src):
-        out = [self.references.pos_flow_0]
-        for m in range(self.num_inputs):
-            if self.references.small_pos_flows[m] is not None:
-                out.append(self.references.small_pos_flows[m])
-        out.append(self.references.neg_flow_0)
-        for m in range(self.num_inputs):
-            if self.references.small_neg_flows[m] is not None:
-                out.append(self.references.small_neg_flows[m])
+    def get_flow(self, src, flow_type, idx):
+        flow = self.parse_flow_reference(flow_type, idx)
+        if self.is_semi:
+            a_model = tf.keras.Model(inputs=self.inputs[0], outputs=flow)
+        else:
+            a_model = tf.keras.Model(inputs=self.inputs, outputs=flow)
 
-        a_model = tf.keras.Model(inputs=self.inputs, outputs=out)
         return self.prebuilt_model_predict(a_model, src, is_cat=False)
+
+    def parse_flow_reference(self, flow_type, idx):
+        if flow_type not in ['pos', 'to_atlas', 'neg', 'to_subject',
+                             'pos_big', 'pos_small', 'neg_big', 'neg_small']:
+            raise ValueError('flow_type must be one of: pos, to_atlas, neg, to_subject')
+
+        if flow_type in ['pos', 'to_atlas']:
+            flow = self.references.pos_flow_compos[idx]
+        elif flow_type in ['neg', 'to_subject']:
+            flow = self.references.neg_flow_compos[idx]
+        elif flow_type == 'pos_big':
+            flow = self.references.pos_flow_0
+        elif flow_type == 'pos_small':
+            flow = self.references.small_pos_flows[idx]
+        elif flow_type == 'neg_big':
+            flow = self.references.neg_flow_0
+        elif flow_type == 'neg_small':
+            flow = self.references.small_neg_flows[idx]
+        return flow
 
     def parse_loss_metric_function(self, fn, is_isw, is_jacobian):
         num = self.num_inputs
