@@ -6,7 +6,7 @@ import numpy as np
 import tensorflow as tf
 
 
-def pad_2d_image_spherically(img, pad_size=8, input_no_batch_dim=False):
+def pad_2d_image_spherically(img, pad_size=16, input_no_batch_dim=False, is_flow=False):
     """
     pad parameterized 2d image based on the spherical positions of its vertices
     img: image to pad, whose shape is [batch_size, H, W, ...] or [H, W] for a single image
@@ -20,10 +20,16 @@ def pad_2d_image_spherically(img, pad_size=8, input_no_batch_dim=False):
         top = flip(top, axis=1)  # flip upside down
         top = roll(top, get_shape(top, 2) // 2, axis=2)  # circularly shift by pi
 
+        # very important, if the image represents a flow field, then the sign of the padded region should be flipped
+        if is_flow:
+            top = -top
+
         # similarly for the south pole on bottom
         bot = img[:, -pad_size - 1:-1, ...]
         bot = flip(bot, axis=1)
         bot = roll(bot, get_shape(bot, 2) // 2, axis=2)
+        if is_flow:
+            bot = -bot
 
         # concatenate top and bottom before padding left and right
         img2 = concat((top, img, bot), axis=1)
@@ -143,13 +149,13 @@ def is_nd(data, n):
             return False
 
 
-def to_tensor(data, d_type=tf.float32):
+def to_tensor(data, dtype=tf.float32):
     if tf.is_tensor(data):
-        if data.dtype is not d_type:
-            data = tf.cast(data, d_type)
+        if data.dtype is not dtype:
+            data = tf.cast(data, dtype)
         return data
     else:
-        return tf.convert_to_tensor(data, d_type)
+        return tf.convert_to_tensor(data, dtype)
 
 
 def spherical_sin(H, W, eps=1e-3):
@@ -220,3 +226,156 @@ def jacobian_2d(x, det=False, is_use_tf_det=False, is_replace_nan=False):
         J = tf.stack(grad, axis=-1)
 
     return J
+
+
+def get_ndims(data):
+    if tf.is_tensor(data):
+        return tf.rank(data)
+    else:
+        return data.ndim
+
+
+@tf.function
+def gaussian_filter_2d(image, filter_shape=(3, 3), sigma=1.0):
+    """Perform Gaussian blur on image(s).
+    Args:
+      image: Either a 2-D `Tensor` of shape `[height, width]`,
+        a 3-D `Tensor` of shape `[height, width, channels]`,
+        or a 4-D `Tensor` of shape `[batch_size, height, width, channels]`.
+      filter_shape: An `integer` or `tuple`/`list` of 2 integers, specifying
+        the height and width of the 2-D gaussian filter. Can be a single
+        integer to specify the same value for all spatial dimensions.
+      sigma: A `float` or `tuple`/`list` of 2 floats, specifying
+        the standard deviation in x and y direction the 2-D gaussian filter.
+        Can be a single float to specify the same value for all spatial
+        dimensions.
+    Returns:
+      2-D, 3-D or 4-D `Tensor` of the same dtype as input.
+    """
+    with tf.name_scope("gaussian_filter_2d"):
+        image = to_tensor(image)
+
+        filter_shape = regulate_tuple(filter_shape, n=2, dtype=int, name='filter_shape')
+        filter_shape = to_tensor(filter_shape, tf.int32)
+
+        sigma = regulate_tuple(sigma, n=2, dtype=float, name='sigma')
+        sigma = to_tensor(sigma)
+
+        original_ndims = get_ndims(image)
+        image = to_4D_image(image)
+
+        channels = tf.shape(image)[3]
+
+        kernel_x = compute_1d_gaussian_kernel(sigma[1], filter_shape[1])
+        kernel_x = kernel_x[tf.newaxis, :]
+        kernel_y = compute_1d_gaussian_kernel(sigma[0], filter_shape[0])
+        kernel_y = kernel_y[:, tf.newaxis]
+        kernel_2d = tf.matmul(kernel_y, kernel_x)
+        kernel_2d = kernel_2d[:, :, tf.newaxis, tf.newaxis]
+        kernel_2d = tf.tile(kernel_2d, [1, 1, channels, 1])
+
+        output = tf.nn.depthwise_conv2d(image, kernel_2d, strides=(1, 1, 1, 1), padding='SAME')
+        output = from_4D_image(output, original_ndims)
+        return output
+
+
+def regulate_tuple(x, n, dtype=float, name=None):
+    if isinstance(x, (list, tuple)):
+        if len(x) != n:
+            raise ValueError(f'{name} should be a {dtype} or a tuple/list of {n} {dtype}')
+        try:
+            x = tuple(dtype(s) for s in x)
+        except (ValueError, TypeError):
+            raise ValueError(f'{name} should be a {dtype} or a tuple/list of {n} {dtype}')
+    else:
+        try:
+            x = (dtype(x),) * n
+        except (ValueError, TypeError):
+            raise ValueError(f'{name} should be a {dtype} or a tuple/list of {n} {dtype}')
+    return x
+
+
+def to_4D_image(image):
+    """Convert 2/3/4D image to 4D image.
+    Args:
+      image: 2/3/4D `Tensor`.
+
+    Returns:
+      4D `Tensor` with the same type.
+    """
+    with tf.control_dependencies(
+            [
+                tf.debugging.assert_rank_in(
+                    image, [2, 3, 4], message="`image` must be 2/3/4D tensor"
+                )
+            ]
+    ):
+        ndims = image.get_shape().ndims
+        if ndims is None:
+            return _dynamic_to_4D_image(image)
+        elif ndims == 2:
+            return image[None, :, :, None]
+        elif ndims == 3:
+            return image[None, :, :, :]
+        else:
+            return image
+
+
+def _dynamic_to_4D_image(image):
+    shape = tf.shape(image)
+    original_rank = tf.rank(image)
+    # 4D image => [N, H, W, C] or [N, C, H, W]
+    # 3D image => [1, H, W, C] or [1, C, H, W]
+    # 2D image => [1, H, W, 1]
+    left_pad = tf.cast(tf.less_equal(original_rank, 3), dtype=tf.int32)
+    right_pad = tf.cast(tf.equal(original_rank, 2), dtype=tf.int32)
+    new_shape = tf.concat(
+        [
+            tf.ones(shape=left_pad, dtype=tf.int32),
+            shape,
+            tf.ones(shape=right_pad, dtype=tf.int32),
+        ],
+        axis=0,
+    )
+    return tf.reshape(image, new_shape)
+
+
+def from_4D_image(image, ndims):
+    """Convert back to an image with `ndims` rank.
+
+    Args:
+      image: 4D `Tensor`.
+      ndims: The original rank of the image.
+
+    Returns:
+      `ndims`-D `Tensor` with the same type.
+    """
+    with tf.control_dependencies(
+            [tf.debugging.assert_rank(image, 4, message="`image` must be 4D tensor")]
+    ):
+        if isinstance(ndims, tf.Tensor):
+            return _dynamic_from_4D_image(image, ndims)
+        elif ndims == 2:
+            return tf.squeeze(image, [0, 3])
+        elif ndims == 3:
+            return tf.squeeze(image, [0])
+        else:
+            return image
+
+
+def _dynamic_from_4D_image(image, original_rank):
+    shape = tf.shape(image)
+    # 4D image <= [N, H, W, C] or [N, C, H, W]
+    # 3D image <= [1, H, W, C] or [1, C, H, W]
+    # 2D image <= [1, H, W, 1]
+    begin = tf.cast(tf.less_equal(original_rank, 3), dtype=tf.int32)
+    end = 4 - tf.cast(tf.equal(original_rank, 2), dtype=tf.int32)
+    new_shape = shape[begin:end]
+    return tf.reshape(image, new_shape)
+
+
+def compute_1d_gaussian_kernel(sigma, filter_shape):
+    """Compute 1D Gaussian kernel."""
+    x = tf.cast(tf.range(-filter_shape // 2 + 1, filter_shape // 2 + 1), dtype=tf.float32)
+    x = tf.nn.softmax(-tf.pow(x, 2.0) / (2.0 * tf.pow(sigma, 2.0)))
+    return x
