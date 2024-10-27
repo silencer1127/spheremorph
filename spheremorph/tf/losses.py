@@ -6,29 +6,13 @@ import keras.backend as K
 import numpy as np
 import tensorflow as tf
 
-from .utils import jacobian_2d, spherical_sin, to_tensor, unpad_2d_image
+from .utils import jacobian_2d
+from .utils import spherical_sin
+from .utils import to_tensor
+from .utils import unpad_2d_image
 
 
-def get_finite_diff_to_neighbors(img):
-    """
-           (d)
-            |
-    (b) -- (a) -- (c)
-            |
-           (e)
-    df_l: a - b
-    df_r: a - c
-    df_t: a - d
-    df_b: a - e
-    """
-    df_l = img - tf.roll(img, 1, axis=2)  # right shift by 1 to get the left neighbor (a - b)
-    df_r = img - tf.roll(img, -1, axis=2)  # left shift by 1 to get the right neighbor (a - c)
-    df_t = img - tf.roll(img, 1, axis=1)  # bottom shift by 1 to get the top neighbor (a - d)
-    df_b = img - tf.roll(img, -1, axis=1)  # top shift by 1 to get bottom neighbor (a - e)
-
-    return df_l, df_r, df_t, df_b
-
-
+# ======================================== classes ========================================
 class SphereLoss:
     def __init__(self,
                  image_shape,
@@ -321,11 +305,25 @@ class SphereLoss:
 
         return loss
 
-    def jacobian_loss(self, is_max=True):
+    def jacobian_loss(self, weight=1.0, p=2.0, is_max=False, eps=1e-2):
         """
         jacobian determinant loss for area distortion
-        :param is_max: if True, control the maximum jacobian determinant, otherwise the mean
+        :param weight: scalar weight for the loss
+        :param p: the order of the norm for the jac det (default 2), larger p panelizes more on larger jac det
+        :param is_max: backward compatibility flag, if True, use max, equivalent to infinity norm
+        :param eps: small number to avoid division by zero
         """
+
+        p = float(p)
+        if p < 2:  # use mean if p is less than 2
+            p = 'mean'
+        elif p >= 2 and p <= 10:  # force even order for the power
+            p = float(2 * round(p / 2))
+        else:  # p > 10 is close to infinity norm, use max to avoid numerical instability
+            p = 'max'
+
+        if is_max:
+            p = 'max'
 
         def loss(x):
             # the 5th dim is optional used for different flows
@@ -356,31 +354,87 @@ class SphereLoss:
             # unpad is done after jacobian computation to avoid boundary effect
             J = self.unpad_loss_images(J, is_ds=True)
 
-            # convert jacobian determinant to distortion measure by subtracting 1
-            # and take abs to penalize both expansion and contraction
-            J = K.abs(J - 1)
+            # convert jacobian determinant to distortion measure to equally penalize both expansion and contraction
+            # avoid small numbers before inversion
+            J = tf.where(J < eps, eps * tf.ones_like(J), J)
+            # set J to reciprical for elements < 1
+            J = tf.where(J < 1, tf.math.reciprocal(J), J)
 
             # spherical distortion correction
             J = tf.multiply(J, self.S_ds[tf.newaxis, ..., tf.newaxis])
 
-            # max/average over flows
-            if is_max:
-                J = K.max(J, axis=-1)
+            # take p norm or mean or max over spatial dimensions and different flows
+            if p == 'mean':
+                J = K.mean(J, axis=[1, 2, 3])
+            elif p == 'max':
+                J = K.max(J, axis=[1, 2, 3])
             else:
-                J = K.mean(J, axis=-1)
-
-            # ==================== data in 3D [batch, H, W] ====================
-            # max/average over spatial dimensions
-            if is_max:
-                J = K.max(J, axis=[1, 2])
-            else:
-                J = K.mean(J, axis=[1, 2])
+                J = K.pow(K.sum(K.pow(J, p), axis=[1, 2, 3]), 1.0 / p)
 
             # ==================== data in 1D [batch, ] ====================
-            # average over batch
-            return K.mean(J)
+            # always average over batches
+            J = K.mean(J)
+
+            # ==================== data in 0D [scalar] ====================
+            # optionally apply a scalar weight
+            J = self.apply_scalar_weight(J, weight)
+
+            return J
 
         return loss
+
+    def gradient_loss(self, weight=1.0):
+        """
+        gradient loss for smoothness, weighted by edge strength and corrected for spherical distortion
+        """
+
+        def loss(y_pred):
+            # ==================== data in 4D [batch, H, W, 2] ====================
+            # compute finite difference to all 4 neighbors
+            df_l, _, df_t, _ = get_finite_diff_to_neighbors(y_pred)
+
+            # un-pad image to the original (possibly downsampled) size
+            df_l, df_t = self.unpad_loss_images(df_l, df_t, is_ds=True)
+
+            # compute the norm square of the gradient (4D -> 3D)
+            df_l_sq = K.sum(K.square(df_l), axis=[-1])
+            df_t_sq = K.sum(K.square(df_t), axis=[-1])
+
+            # ==================== data in 3D [batch, H, W] ====================
+            # some math here: phi is the variable along longitude (vertical)
+            # theta is the variable along latitude (horizontal)
+            # grad f = df/d\phi + 1/sin(\phi) * df/d\theta
+            # |grad f|^2 = |df/d\phi|^2 + 1/sin^2(\phi) |df/d\theta|^2
+            # \int |grad f|^2 d\Omega =
+            # \int (|df/d\phi|^2 + 1/sin^2(\phi) |df/d\theta|^2) sin(\phi) d\phi d\theta
+
+            # apply 1/sin^2 weights on the neighbors with same latitude (horizontally)
+            df_l_sq = tf.multiply(df_l_sq, self.S_inv_2_ds[tf.newaxis, :, :])
+
+            # sum of the norm square and average over batch (3D -> 2D)
+            df_sq = K.mean(df_l_sq + df_t_sq, axis=[0])
+
+            # ==================== data in 2D [H, W] ====================
+            # weigh the norm square by the spherical distortion correction
+            # (sin for both vertical and horizontal differences)
+            df_sq = tf.multiply(df_sq, self.S_ds)
+
+            # apply mask if mask is same for all features
+            if (self.mask_ds is not None) and (self.mask_ndim == 2):
+                df_sq = self.apply_spatial_weights(df_sq, self.mask_ds)
+
+            # average over spatial dimensions (2D -> 0D)
+            df_sq = K.mean(df_sq)
+
+            # ==================== data in 0D [scalar] ====================
+            # optionally apply a scalar weight
+            df_sq = self.apply_scalar_weight(df_sq, weight)
+
+            return df_sq
+
+        return loss
+
+    # ---------------------------- experimental losses below ----------------------------
 
     def ncc_loss(self, weight=1.0, win_size=9, is_corr=False, ft_idx=None):
         """
@@ -471,50 +525,6 @@ class SphereLoss:
 
         return loss
 
-    def gradient_loss(self):
-        """
-        gradient loss for smoothness, weighted by edge strength and corrected for spherical distortion
-        """
-
-        def loss(y_pred):
-            # ==================== data in 4D [batch, H, W, 2] ====================
-            # compute finite difference to all 4 neighbors
-            df_l, _, df_t, _ = get_finite_diff_to_neighbors(y_pred)
-
-            # un-pad image to the original (possibly downsampled) size
-            df_l, df_t = self.unpad_loss_images(df_l, df_t, is_ds=True)
-
-            # compute the norm square of the gradient (4D -> 3D)
-            df_l_sq = K.sum(K.square(df_l), axis=[-1])
-            df_t_sq = K.sum(K.square(df_t), axis=[-1])
-
-            # ==================== data in 3D [batch, H, W] ====================
-            # some math here: phi is the variable along longitude (vertical)
-            # theta is the variable along latitude (horizontal)
-            # grad f = df/d\phi + 1/sin(\phi) * df/d\theta
-            # |grad f|^2 = |df/d\phi|^2 + 1/sin^2(\phi) |df/d\theta|^2
-            # \int |grad f|^2 d\Omega =
-            # \int (|df/d\phi|^2 + 1/sin^2(\phi) |df/d\theta|^2) sin(\phi) d\phi d\theta
-
-            # apply 1/sin^2 weights on the neighbors with same latitude (horizontally)
-            df_l_sq = tf.multiply(df_l_sq, self.S_inv_2_ds[tf.newaxis, :, :])
-
-            # sum of the norm square and average over batch (3D -> 2D)
-            df_sq = K.mean(df_l_sq + df_t_sq, axis=[0])
-
-            # ==================== data in 2D [H, W] ====================
-            # weigh the norm square by the spherical distortion correction
-            # (sin for both vertical and horizontal differences)
-            df_sq = tf.multiply(df_sq, self.S_ds)
-
-            # apply mask if mask is same for all features
-            if (self.mask_ds is not None) and (self.mask_ndim == 2):
-                df_sq = tf.multiply(df_sq, self.mask_ds)
-
-            return K.mean(df_sq)
-
-        return loss
-
     def laplacian_loss(self, weight=1.0):
         """
         laplacian loss for smoothness, weighted by edge strength and corrected for spherical distortion
@@ -586,6 +596,8 @@ class SphereLoss:
                 return 0.0
 
         return loss
+
+    # ---------------------------- experimental losses above ----------------------------
 
     def downsample_2d_image(self, img, method='bilinear'):
         if self.int_ds > 1:
@@ -683,14 +695,39 @@ class SphereLoss:
         # weights can be a scalar or a vector
         # convert it to np array to find out its length
         # convert it to tensor to use it in tensorflow
-        if isinstance(weights, (int, float)):
-            w = [float(weights)]
-        else:
-            w = weights
-        w = np.array(w)
-        w_len = len(w)
-        w_ts = to_tensor(w)
+        if isinstance(weights, (int, float, list, tuple, np.ndarray)):
+            if isinstance(weights, (int, float)):
+                w = [float(weights)]
+            else:
+                w = weights
+            w = np.array(w)
+            w_len = len(w)
+            w_ts = to_tensor(w)
+        elif isinstance(weights, tf.Variable):
+            w_ts = to_tensor(weights)
+            w_len = tf.size(w_ts)
         return w_ts, w_len
+
+
+# ======================================== functions ========================================
+def get_finite_diff_to_neighbors(img):
+    """
+           (d)
+            |
+    (b) -- (a) -- (c)
+            |
+           (e)
+    df_l: a - b
+    df_r: a - c
+    df_t: a - d
+    df_b: a - e
+    """
+    df_l = img - tf.roll(img, 1, axis=2)  # right shift by 1 to get the left neighbor (a - b)
+    df_r = img - tf.roll(img, -1, axis=2)  # left shift by 1 to get the right neighbor (a - c)
+    df_t = img - tf.roll(img, 1, axis=1)  # bottom shift by 1 to get the top neighbor (a - d)
+    df_b = img - tf.roll(img, -1, axis=1)  # top shift by 1 to get bottom neighbor (a - e)
+
+    return df_l, df_r, df_t, df_b
 
 
 # only used with end point loss layers, where y_pred is supposed to be a scalar, just return it
