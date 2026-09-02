@@ -2,12 +2,12 @@
 tensorflow/keras layers for spheremorph
 """
 
-import keras.backend as K
-import keras.layers as KL
+from tensorflow.keras import backend as K
+from tensorflow.keras import layers as KL
 import neurite as ne
 import numpy as np
 import tensorflow as tf
-from keras.layers import Layer
+from tensorflow.keras.layers import Layer
 
 from .utils import unpad_2d_image, pad_2d_image_spherically, jacobian_2d, gaussian_filter_2d
 

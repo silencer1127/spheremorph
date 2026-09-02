@@ -2,8 +2,8 @@
 tensorflow/keras networks for spheremorph
 """
 
-import keras.initializers as KI
-import keras.layers as KL
+from tensorflow.keras import initializers as KI
+from tensorflow.keara import layers as KL
 import neurite as ne
 import numpy as np
 import tensorflow as tf

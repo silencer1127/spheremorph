@@ -2,7 +2,7 @@
 tensorflow/keras losses for spheremorph
 """
 
-import keras.backend as K
+from tensorflow.keras import backend as K
 import numpy as np
 import tensorflow as tf
 
