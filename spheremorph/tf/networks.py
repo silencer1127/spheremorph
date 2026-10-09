@@ -2,12 +2,12 @@
 tensorflow/keras networks for spheremorph
 """
 
-from tensorflow.keras import initializers as KI
-from tensorflow.keara import layers as KL
 import neurite as ne
 import numpy as np
 import tensorflow as tf
 import voxelmorph as vxm
+from tensorflow.keras import initializers as KI
+from tensorflow.keras import layers as KL
 
 from . import layers
 
@@ -15,22 +15,24 @@ from . import layers
 # Ordinate SphereMorph for pairwise registration
 class SphereMorph(ne.modelio.LoadableModel):
     @ne.modelio.store_config_args
-    def __init__(self,
-                 input_shape_ft=None,
-                 input_model=None,
-                 nb_unet_features=None,
-                 loss_fn=None,
-                 metric_fn=None,
-                 metric_name=None,
-                 is_bidir=True,
-                 pad_size=0,
-                 int_steps=7,
-                 int_method='ss',
-                 interp_method='linear',
-                 is_neg_jacobian_filter=True,
-                 is_jacobian=True,
-                 name='spheremorph',
-                 **kwargs):
+    def __init__(
+        self,
+        input_shape_ft=None,
+        input_model=None,
+        nb_unet_features=None,
+        loss_fn=None,
+        metric_fn=None,
+        metric_name=None,
+        is_bidir=True,
+        pad_size=0,
+        int_steps=7,
+        int_method="ss",
+        interp_method="linear",
+        is_neg_jacobian_filter=True,
+        is_jacobian=True,
+        name="spheremorph",
+        **kwargs,
+    ):
         """
         :param input_shape_ft: the shape of the input [H, W, F] without batch dimension
         :param input_model: if input a model, the input of this model is the output of input_model
@@ -51,9 +53,9 @@ class SphereMorph(ne.modelio.LoadableModel):
         # config inputs
         if input_model is None:
             if input_shape_ft is None:
-                raise ValueError('input_shape_ft must be provided if input_model is None')
-            subject = KL.Input(shape=input_shape_ft, name=f'{name}_source_input')
-            atlas = KL.Input(shape=input_shape_ft, name=f'{name}_target_input')
+                raise ValueError("input_shape_ft must be provided if input_model is None")
+            subject = KL.Input(shape=input_shape_ft, name=f"{name}_source_input")
+            atlas = KL.Input(shape=input_shape_ft, name=f"{name}_target_input")
             spm_inputs = [subject, atlas]
             model_inputs = spm_inputs
             num_inputs = len(spm_inputs)
@@ -67,7 +69,7 @@ class SphereMorph(ne.modelio.LoadableModel):
                 input_shape_ft.append(spm_inputs[m].get_shape().as_list()[1:])
 
         if num_inputs != 2:
-            raise ValueError('this network requires exactly two inputs')
+            raise ValueError("this network requires exactly two inputs")
 
         self.num_inputs = num_inputs
 
@@ -78,64 +80,108 @@ class SphereMorph(ne.modelio.LoadableModel):
         ndims = len(input_shape)
 
         vxm_model = vxm.networks.VxmDense(
-            input_shape, nb_unet_features=nb_unet_features,
-            bidir=True, input_model=vxm_model_input, int_resolution=1, **kwargs)
+            input_shape,
+            nb_unet_features=nb_unet_features,
+            bidir=True,
+            input_model=vxm_model_input,
+            int_resolution=1,
+            **kwargs,
+        )
 
         unet_output = vxm_model.references.unet_model.output
-        svf = layers.SphericalConv2D(ndims, kernel_size=3, pad_size=pad_size,
-                                     is_flow=True, padding='same',
-                                     kernel_initializer=KI.RandomNormal(mean=0.0, stddev=1e-5),
-                                     name=f'svf')(unet_output)
-        pos_flow = vxm.layers.VecInt(method=int_method, name=f'pos_flow',
-                                     int_steps=int_steps)(svf)
+        svf = layers.SphericalConv2D(
+            ndims,
+            kernel_size=3,
+            pad_size=pad_size,
+            is_flow=True,
+            padding="same",
+            kernel_initializer=KI.RandomNormal(mean=0.0, stddev=1e-5),
+            name="svf",
+        )(unet_output)
+        pos_flow = vxm.layers.VecInt(method=int_method, name="pos_flow", int_steps=int_steps)(svf)
 
-        neg_svf = ne.layers.Negate(name=f'neg_svf')(svf)
-        neg_flow = vxm.layers.VecInt(method=int_method, name=f'neg_flow',
-                                     int_steps=int_steps)(neg_svf)
+        neg_svf = ne.layers.Negate(name="neg_svf")(svf)
+        neg_flow = vxm.layers.VecInt(method=int_method, name="neg_flow", int_steps=int_steps)(
+            neg_svf
+        )
 
         if is_neg_jacobian_filter:
-            pos_flow = layers.NegativeJacobianFiltering2D(filter_shape=(2, 2), sigma=0.7,
-                                                          pad_size=pad_size, name='pos_flow_njf')(pos_flow)
-            neg_flow = layers.NegativeJacobianFiltering2D(filter_shape=(2, 2), sigma=0.7,
-                                                          pad_size=pad_size, name='neg_flow_njf')(neg_flow)
+            pos_flow = layers.NegativeJacobianFiltering2D(
+                filter_shape=(2, 2), sigma=0.7, pad_size=pad_size, name="pos_flow_njf"
+            )(pos_flow)
+            neg_flow = layers.NegativeJacobianFiltering2D(
+                filter_shape=(2, 2), sigma=0.7, pad_size=pad_size, name="neg_flow_njf"
+            )(neg_flow)
 
-        warped_subject = vxm.layers.SpatialTransformer(interp_method=interp_method, indexing='ij', fill_value=None,
-                                                       name='warped_subject')([subject, pos_flow])
+        warped_subject = vxm.layers.SpatialTransformer(
+            interp_method=interp_method, indexing="ij", fill_value=None, name="warped_subject"
+        )([subject, pos_flow])
 
-        warped_atlas = vxm.layers.SpatialTransformer(interp_method=interp_method, indexing='ij', fill_value=None,
-                                                     name='warped_atlas')([atlas, neg_flow])
+        warped_atlas = vxm.layers.SpatialTransformer(
+            interp_method=interp_method, indexing="ij", fill_value=None, name="warped_atlas"
+        )([atlas, neg_flow])
 
-        loss_fn_atlas, loss_fn_warp, loss_fn_ms, \
-            loss_fn_jacobian, loss_fn_subject = self.parse_loss_metric_function(loss_fn, is_bidir, is_jacobian)
+        loss_fn_atlas, loss_fn_warp, loss_fn_ms, loss_fn_jacobian, loss_fn_subject = (
+            self.parse_loss_metric_function(loss_fn, is_bidir, is_jacobian)
+        )
 
         if metric_fn is not None:
-            metric_fn_atlas, metric_fn_warp, metric_fn_ms, metric_fn_jacobian, \
-                metric_fn_subject = self.parse_loss_metric_function(metric_fn, is_bidir, is_jacobian)
-            mn_atlas, mn_warp, mn_ms, mn_jacobian, \
-                mn_subject = self.parse_loss_metric_function(metric_name, is_bidir, is_jacobian)
+            metric_fn_atlas, metric_fn_warp, metric_fn_ms, metric_fn_jacobian, metric_fn_subject = (
+                self.parse_loss_metric_function(metric_fn, is_bidir, is_jacobian)
+            )
+            mn_atlas, mn_warp, mn_ms, mn_jacobian, mn_subject = self.parse_loss_metric_function(
+                metric_name, is_bidir, is_jacobian
+            )
         else:
-            metric_fn_atlas = metric_fn_warp = metric_fn_ms = metric_fn_jacobian = metric_fn_subject = None
+            metric_fn_atlas = metric_fn_warp = metric_fn_ms = metric_fn_jacobian = (
+                metric_fn_subject
+            ) = None
             mn_atlas = mn_warp = mn_ms = mn_jacobian = mn_subject = None
 
-        atlas_loss = layers.create_loss_end([atlas, warped_subject], loss_fn_atlas, name=f'loss_atlas',
-                                            metric_fn=metric_fn_atlas, metric_name=mn_atlas)
+        atlas_loss = layers.create_loss_end(
+            [atlas, warped_subject],
+            loss_fn_atlas,
+            name="loss_atlas",
+            metric_fn=metric_fn_atlas,
+            metric_name=mn_atlas,
+        )
 
-        warp_loss = layers.create_loss_end([pos_flow], loss_fn_warp, name=f'loss_warp',
-                                           metric_fn=metric_fn_warp, metric_name=mn_warp)
+        warp_loss = layers.create_loss_end(
+            [pos_flow],
+            loss_fn_warp,
+            name="loss_warp",
+            metric_fn=metric_fn_warp,
+            metric_name=mn_warp,
+        )
 
-        mean_stream = ne.layers.MeanStream(name='mean_stream')(pos_flow)
-        ms_loss = layers.create_loss_end([mean_stream], loss_fn_ms, name='loss_mean_stream',
-                                         metric_fn=metric_fn_ms, metric_name=mn_ms)
+        mean_stream = ne.layers.MeanStream(name="mean_stream")(pos_flow)
+        ms_loss = layers.create_loss_end(
+            [mean_stream],
+            loss_fn_ms,
+            name="loss_mean_stream",
+            metric_fn=metric_fn_ms,
+            metric_name=mn_ms,
+        )
 
         if is_jacobian:
-            jacobian_loss = layers.create_loss_end([pos_flow], loss_fn_jacobian, name='loss_jacobian',
-                                                   metric_fn=metric_fn_jacobian, metric_name=mn_jacobian)
+            jacobian_loss = layers.create_loss_end(
+                [pos_flow],
+                loss_fn_jacobian,
+                name="loss_jacobian",
+                metric_fn=metric_fn_jacobian,
+                metric_name=mn_jacobian,
+            )
         else:
             jacobian_loss = None
 
         if is_bidir:
-            subject_loss = layers.create_loss_end([subject, warped_atlas], loss_fn_subject, name=f'loss_subject',
-                                                  metric_fn=metric_fn_subject, metric_name=mn_subject)
+            subject_loss = layers.create_loss_end(
+                [subject, warped_atlas],
+                loss_fn_subject,
+                name="loss_subject",
+                metric_fn=metric_fn_subject,
+                metric_name=mn_subject,
+            )
         else:
             subject_loss = None
 
@@ -149,8 +195,9 @@ class SphereMorph(ne.modelio.LoadableModel):
 
         # until this point, the model construction is done
         # below we construct a separate model for generating outputs without loss end points
-        model_no_lep = tf.keras.Model(inputs=model_inputs,
-                                      outputs=[warped_subject, warped_atlas, pos_flow, neg_flow])
+        model_no_lep = tf.keras.Model(
+            inputs=model_inputs, outputs=[warped_subject, warped_atlas, pos_flow, neg_flow]
+        )
 
         # cache pointers to important layers and tensors for future reference
         self.references = ne.modelio.LoadableModel.ReferenceContainer()
@@ -180,14 +227,16 @@ class SphereMorph(ne.modelio.LoadableModel):
     def get_negative_flow(self, src):
         return self.get_model_outputs(src)[3]
 
-    def warp(self, src, img, flow_type, interp_method='linear', fill_value=None, batch_size=8, **kwargs):
+    def warp(
+        self, src, img, flow_type, interp_method="linear", fill_value=None, batch_size=8, **kwargs
+    ):
         # **kwargs appended last allows extra arguments passed to be compatible with JOSA warp API
         # e.g. the idx argument for JOSA, which is not used in spheremorph
 
-        if flow_type in ['pos', 'to_atlas']:
+        if flow_type in ["pos", "to_atlas"]:
             model_warp = self.references.model_warp_to_atlas
             flow = self.references.pos_flow
-        elif flow_type in ['neg', 'to_subject']:
+        elif flow_type in ["neg", "to_subject"]:
             model_warp = self.references.model_warp_to_subject
             flow = self.references.neg_flow
 
@@ -195,7 +244,9 @@ class SphereMorph(ne.modelio.LoadableModel):
         # this avoid building the model every time the function is called
         if (model_warp is None) or (model_warp.inputs[1].shape[1:] != img.shape[1:]):
             img_input = tf.keras.Input(shape=img.shape[1:])
-            st_layer = vxm.layers.SpatialTransformer(interp_method=interp_method, fill_value=fill_value)
+            st_layer = vxm.layers.SpatialTransformer(
+                interp_method=interp_method, fill_value=fill_value
+            )
             img_output = st_layer([img_input, flow])
             model_inputs = (*self.inputs, img_input)
             model_outputs = [img_output]
@@ -217,22 +268,24 @@ class SphereMorph(ne.modelio.LoadableModel):
 # SphereMorph with atlas building
 class SphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
     @ne.modelio.store_config_args
-    def __init__(self,
-                 input_shape_ft=None,
-                 input_model=None,
-                 nb_unet_features=None,
-                 loss_fn=None,
-                 metric_fn=None,
-                 metric_name=None,
-                 is_bidir=True,
-                 int_steps=7,
-                 int_method='ss',
-                 pad_size=0,
-                 is_atlas_trainable=True,
-                 is_jacobian=True,
-                 is_neg_jacobian_filter=True,
-                 name='smab',
-                 **kwargs):
+    def __init__(
+        self,
+        input_shape_ft=None,
+        input_model=None,
+        nb_unet_features=None,
+        loss_fn=None,
+        metric_fn=None,
+        metric_name=None,
+        is_bidir=True,
+        int_steps=7,
+        int_method="ss",
+        pad_size=0,
+        is_atlas_trainable=True,
+        is_jacobian=True,
+        is_neg_jacobian_filter=True,
+        name="smab",
+        **kwargs,
+    ):
         """
         :param input_shape_ft: the shape of the input [H, W, F] without batch dimension
         :param input_model: if input a model, the input of this model is the output of input_model
@@ -254,15 +307,15 @@ class SphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
         # config inputs
         if input_model is None:
             if input_shape_ft is None:
-                raise ValueError('input_shape_ft must be provided if input_model is None')
-            this_input = KL.Input(shape=input_shape_ft, name='%s_input' % name)
+                raise ValueError("input_shape_ft must be provided if input_model is None")
+            this_input = KL.Input(shape=input_shape_ft, name="%s_input" % name)
             model_inputs = this_input
         else:
             model_inputs = input_model.inputs
             if len(input_model.outputs) == 1:
                 this_input = input_model.outputs[0]
             else:
-                this_input = KL.concatenate(input_model.outputs, name=f'{name}_input')
+                this_input = KL.concatenate(input_model.outputs, name=f"{name}_input")
             input_shape_ft = this_input.shape[1:]
 
         mean_layer = layers.SphericalLocalParamWithInput(
@@ -271,23 +324,25 @@ class SphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
             initializer=KI.RandomNormal(mean=0.0, stddev=1e-3),
             pad_size=pad_size,
             trainable=is_atlas_trainable,
-            name=f'atlas_mean'
+            name="atlas_mean",
         )
         atlas_mean = mean_layer(this_input)
 
         spm_input_model = tf.keras.Model(inputs=model_inputs, outputs=[this_input, atlas_mean])
-        spm_model = SphereMorph(input_model=spm_input_model,
-                                nb_unet_features=nb_unet_features,
-                                loss_fn=loss_fn,
-                                metric_fn=metric_fn,
-                                metric_name=metric_name,
-                                is_bidir=is_bidir,
-                                pad_size=pad_size,
-                                int_steps=int_steps,
-                                int_method=int_method,
-                                is_neg_jacobian_filter=is_neg_jacobian_filter,
-                                is_jacobian=is_jacobian,
-                                name=name)
+        spm_model = SphereMorph(
+            input_model=spm_input_model,
+            nb_unet_features=nb_unet_features,
+            loss_fn=loss_fn,
+            metric_fn=metric_fn,
+            metric_name=metric_name,
+            is_bidir=is_bidir,
+            pad_size=pad_size,
+            int_steps=int_steps,
+            int_method=int_method,
+            is_neg_jacobian_filter=is_neg_jacobian_filter,
+            is_jacobian=is_jacobian,
+            name=name,
+        )
 
         super().__init__(inputs=model_inputs, outputs=spm_model.outputs)
 
@@ -329,14 +384,16 @@ class SphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
     def get_negative_flow(self, src):
         return self.get_model_outputs(src)[3]
 
-    def warp(self, src, img, flow_type, interp_method='linear', fill_value=None, batch_size=8, **kwargs):
+    def warp(
+        self, src, img, flow_type, interp_method="linear", fill_value=None, batch_size=8, **kwargs
+    ):
         # **kwargs appended last allows extra arguments passed to be compatible with JOSA warp API
         # e.g. the idx argument for JOSA, which is not used in spheremorph
 
-        if flow_type in ['pos', 'to_atlas']:
+        if flow_type in ["pos", "to_atlas"]:
             model_warp = self.references.model_warp_to_atlas
             flow = self.references.pos_flow
-        elif flow_type in ['neg', 'to_subject']:
+        elif flow_type in ["neg", "to_subject"]:
             model_warp = self.references.model_warp_to_subject
             flow = self.references.neg_flow
 
@@ -344,15 +401,17 @@ class SphereMorphWithAtlasBuilding(ne.modelio.LoadableModel):
         # this avoid building the model every time the function is called
         if (model_warp is None) or (model_warp.inputs[1].shape[1:] != img.shape[1:]):
             img_input = tf.keras.Input(shape=img.shape[1:])
-            st_layer = vxm.layers.SpatialTransformer(interp_method=interp_method, fill_value=fill_value)
+            st_layer = vxm.layers.SpatialTransformer(
+                interp_method=interp_method, fill_value=fill_value
+            )
             img_output = st_layer([img_input, flow])
             model_inputs = (*self.inputs, img_input)
             model_outputs = [img_output]
             model_warp = tf.keras.Model(inputs=model_inputs, outputs=model_outputs)
 
-            if flow_type in ['pos', 'to_atlas']:
+            if flow_type in ["pos", "to_atlas"]:
                 self.references.model_warp_to_atlas = model_warp
-            elif flow_type in ['neg', 'to_subject']:
+            elif flow_type in ["neg", "to_subject"]:
                 self.references.model_warp_to_subject = model_warp
 
         if isinstance(src, (list, tuple)):
@@ -369,29 +428,30 @@ SMAB = SphereMorphWithAtlasBuilding
 
 # JOSA version 3, up-to-date with several improvements over original JOSA used in the papers
 class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
-
     @ne.modelio.store_config_args
-    def __init__(self,
-                 input_shape_ft=None,
-                 input_model=None,
-                 nb_unet_features=None,
-                 loss_fn=None,
-                 metric_fn=None,
-                 metric_name=None,
-                 is_bidir=True,
-                 int_steps=7,
-                 int_method='ss',
-                 pad_size=0,
-                 pos_enc=0,
-                 is_semi=False,
-                 is_atlas_trainable=True,
-                 input_type='float',
-                 is_isw=True,
-                 is_softmax=True,
-                 is_jacobian=False,
-                 is_neg_jacobian_filter=True,
-                 name='josa',
-                 **kwargs):
+    def __init__(
+        self,
+        input_shape_ft=None,
+        input_model=None,
+        nb_unet_features=None,
+        loss_fn=None,
+        metric_fn=None,
+        metric_name=None,
+        is_bidir=True,
+        int_steps=7,
+        int_method="ss",
+        pad_size=0,
+        pos_enc=0,
+        is_semi=False,
+        is_atlas_trainable=True,
+        input_type="float",
+        is_isw=True,
+        is_softmax=True,
+        is_jacobian=False,
+        is_neg_jacobian_filter=True,
+        name="josa",
+        **kwargs,
+    ):
         """
         :param input_shape_ft: the shape of the input [H, W, F] without batch dimension
         :param input_model: if input a model, the input of this model is the output of input_model
@@ -417,11 +477,11 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
         # config inputs
         if input_model is None:
             if input_shape_ft is None:
-                raise ValueError('input_shape_ft must be provided if input_model is None')
+                raise ValueError("input_shape_ft must be provided if input_model is None")
             num_inputs = len(input_shape_ft)
             tisw_inputs = []
             for m in range(num_inputs):
-                tisw_inputs.append(KL.Input(shape=input_shape_ft[m], name=f'{name}_input_{m + 1}'))
+                tisw_inputs.append(KL.Input(shape=input_shape_ft[m], name=f"{name}_input_{m + 1}"))
             model_inputs = tisw_inputs
         else:
             model_inputs = input_model.inputs
@@ -432,7 +492,7 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
                 input_shape_ft.append(tisw_inputs[m].get_shape().as_list()[1:])
 
         if num_inputs < 2:
-            raise ValueError('this network requires at least two inputs')
+            raise ValueError("this network requires at least two inputs")
 
         self.num_inputs = num_inputs
 
@@ -448,7 +508,7 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
                 initializer=KI.RandomNormal(mean=0.0, stddev=1e-3),
                 pad_size=pad_size,
                 trainable=is_atlas_trainable[m],
-                name=f'atlas_mean_{m + 1}'
+                name=f"atlas_mean_{m + 1}",
             )
             mean_layers.append(mean_layer)
             atlas_mean = mean_layer(tisw_inputs[m])
@@ -459,45 +519,78 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
             tisw_input_cat = tisw_inputs[0]
             atlas_mean_cat = atlas_means[0]
         else:
-            tisw_input_cat = KL.concatenate(tisw_inputs, axis=-1, name='input_cat')
-            atlas_mean_cat = KL.concatenate(atlas_means, axis=-1, name='atlas_mean_cat')
+            tisw_input_cat = KL.concatenate(tisw_inputs, axis=-1, name="input_cat")
+            atlas_mean_cat = KL.concatenate(atlas_means, axis=-1, name="atlas_mean_cat")
 
         input_cat_shape = tisw_input_cat.get_shape().as_list()[1:-1]
-        vxm_model_input = tf.keras.Model(inputs=model_inputs,
-                                         outputs=[tisw_input_cat, atlas_mean_cat])
+        vxm_model_input = tf.keras.Model(
+            inputs=model_inputs, outputs=[tisw_input_cat, atlas_mean_cat]
+        )
 
         if pos_enc > 0:
-            vxm_model = vxms.networks.VxmDenseWithPositionalEncoding(input_cat_shape,
-                                                                     npos=pos_enc, pad_size=pad_size,
-                                                                     nb_unet_features=nb_unet_features,
-                                                                     bidir=True, input_model=vxm_model_input,
-                                                                     int_resolution=1, **kwargs)
+            vxm_model = VxmDenseWithPositionalEncoding(
+                input_cat_shape,
+                npos=pos_enc,
+                pad_size=pad_size,
+                nb_unet_features=nb_unet_features,
+                bidir=True,
+                input_model=vxm_model_input,
+                int_resolution=1,
+                **kwargs,
+            )
         else:
-            vxm_model = vxm.networks.VxmDense(input_cat_shape, nb_unet_features=nb_unet_features,
-                                              bidir=True, input_model=vxm_model_input, int_resolution=1, **kwargs)
+            vxm_model = vxm.networks.VxmDense(
+                input_cat_shape,
+                nb_unet_features=nb_unet_features,
+                bidir=True,
+                input_model=vxm_model_input,
+                int_resolution=1,
+                **kwargs,
+            )
 
         ndims = len(input_cat_shape)
         unet_output = vxm_model.references.unet_model.output
 
         # compute joint svf and flow from the unet output using SphericalConv2D
-        svf_0 = layers.SphericalConv2D(ndims, kernel_size=3, pad_size=pad_size, is_flow=True, padding='same',
-                                       kernel_initializer=KI.RandomNormal(mean=0.0, stddev=1e-5),
-                                       name=f'svf_0')(unet_output)
-        pos_flow_0 = vxm.layers.VecInt(method=int_method, name=f'pos_flow_0', int_steps=int_steps)(svf_0)
+        svf_0 = layers.SphericalConv2D(
+            ndims,
+            kernel_size=3,
+            pad_size=pad_size,
+            is_flow=True,
+            padding="same",
+            kernel_initializer=KI.RandomNormal(mean=0.0, stddev=1e-5),
+            name="svf_0",
+        )(unet_output)
+        pos_flow_0 = vxm.layers.VecInt(method=int_method, name="pos_flow_0", int_steps=int_steps)(
+            svf_0
+        )
 
-        neg_svf_0 = ne.layers.Negate(name=f'neg_svf_0')(svf_0)
-        neg_flow_0 = vxm.layers.VecInt(method=int_method, name=f'neg_flow_0', int_steps=int_steps)(neg_svf_0)
+        neg_svf_0 = ne.layers.Negate(name="neg_svf_0")(svf_0)
+        neg_flow_0 = vxm.layers.VecInt(method=int_method, name="neg_flow_0", int_steps=int_steps)(
+            neg_svf_0
+        )
 
-        loss_fn_atlas, loss_fn_big_warp, loss_fn_small_warp, \
-            loss_fn_ms, loss_fn_jacobian, loss_fn_subject = \
-            self.parse_loss_metric_function(loss_fn, is_isw, is_jacobian)
+        (
+            loss_fn_atlas,
+            loss_fn_big_warp,
+            loss_fn_small_warp,
+            loss_fn_ms,
+            loss_fn_jacobian,
+            loss_fn_subject,
+        ) = self.parse_loss_metric_function(loss_fn, is_isw, is_jacobian)
 
         if metric_fn is not None:
-            metric_fn_atlas, metric_fn_big_warp, metric_fn_small_warp, \
-                metric_fn_ms, metric_fn_jacobian, metric_fn_subject = \
-                self.parse_loss_metric_function(metric_fn, is_isw, is_jacobian)
-            mn_atlas, mn_big_warp, mn_small_warp, mn_ms, mn_jacobian, mn_subject = \
+            (
+                metric_fn_atlas,
+                metric_fn_big_warp,
+                metric_fn_small_warp,
+                metric_fn_ms,
+                metric_fn_jacobian,
+                metric_fn_subject,
+            ) = self.parse_loss_metric_function(metric_fn, is_isw, is_jacobian)
+            mn_atlas, mn_big_warp, mn_small_warp, mn_ms, mn_jacobian, mn_subject = (
                 self.parse_loss_metric_function(metric_name, is_isw, is_jacobian)
+            )
         else:
             metric_fn_atlas = metric_fn_subject = [None] * num_inputs
             metric_fn_big_warp = metric_fn_small_warp = metric_fn_ms = metric_fn_jacobian = None
@@ -519,72 +612,97 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
         if not isinstance(input_type, (list, tuple)):
             input_type = [input_type] * num_inputs
         for m in range(num_inputs):
-            assert input_type[m] in ('float', 'label', 'prob'), \
-                f'input_type should be in (float, label, prob)'
+            assert input_type[m] in ("float", "label", "prob"), (
+                "input_type should be in (float, label, prob)"
+            )
         self.input_type = input_type
 
-        interp_method = ['nearest' if self.input_type[m] == 'label' else 'linear' \
-                         for m in range(num_inputs)]
+        interp_method = [
+            "nearest" if self.input_type[m] == "label" else "linear" for m in range(num_inputs)
+        ]
         self.interp_method = interp_method
 
-        is_softmax_atlas = [True if self.input_type[m] == 'prob' and is_softmax else False \
-                            for m in range(num_inputs)]
+        is_softmax_atlas = [
+            True if self.input_type[m] == "prob" and is_softmax else False
+            for m in range(num_inputs)
+        ]
         self.is_softmax_atlas = is_softmax_atlas
 
         for m in range(num_inputs):
             if is_isw:
                 # individual svf
-                svf = layers.SphericalConv2D(ndims, kernel_size=3, pad_size=pad_size, is_flow=True, padding='same',
-                                             kernel_initializer=KI.RandomNormal(mean=0.0, stddev=1e-5),
-                                             name=f'svf_{m + 1}')(unet_output)
+                svf = layers.SphericalConv2D(
+                    ndims,
+                    kernel_size=3,
+                    pad_size=pad_size,
+                    is_flow=True,
+                    padding="same",
+                    kernel_initializer=KI.RandomNormal(mean=0.0, stddev=1e-5),
+                    name=f"svf_{m + 1}",
+                )(unet_output)
                 # individual flow (for regularization)
-                flow = vxm.layers.VecInt(method=int_method, name=f'pos_flow_{m + 1}',
-                                         int_steps=int_steps)(svf)
+                flow = vxm.layers.VecInt(
+                    method=int_method, name=f"pos_flow_{m + 1}", int_steps=int_steps
+                )(svf)
 
                 # composite svf with svf_0 first
-                pos_svf_compo = KL.add([svf_0, svf], name=f'pos_svf_compo_{m + 1}')
+                pos_svf_compo = KL.add([svf_0, svf], name=f"pos_svf_compo_{m + 1}")
 
                 # then integrate to get the compo flow
-                pos_flow_compo = vxm.layers.VecInt(method=int_method, name=f'pos_flow_compo_{m + 1}',
-                                                   int_steps=int_steps)(pos_svf_compo)
+                pos_flow_compo = vxm.layers.VecInt(
+                    method=int_method, name=f"pos_flow_compo_{m + 1}", int_steps=int_steps
+                )(pos_svf_compo)
 
                 if is_neg_jacobian_filter:
-                    pos_flow_compo = layers.NegativeJacobianFiltering2D(filter_shape=(2, 2), sigma=0.7,
-                                                                        pad_size=pad_size,
-                                                                        name=f'pos_flow_compo_njf_{m + 1}')(
-                        pos_flow_compo)
+                    pos_flow_compo = layers.NegativeJacobianFiltering2D(
+                        filter_shape=(2, 2),
+                        sigma=0.7,
+                        pad_size=pad_size,
+                        name=f"pos_flow_compo_njf_{m + 1}",
+                    )(pos_flow_compo)
 
                 # similarly for neg svf and flow
-                neg_svf = ne.layers.Negate(name=f'neg_svf_{m + 1}')(svf)
-                neg_flow = vxm.layers.VecInt(method=int_method, name=f'neg_flow_{m + 1}',
-                                             int_steps=int_steps)(neg_svf)
-                neg_svf_compo = KL.add([neg_svf_0, neg_svf], name=f'neg_svf_compo_{m + 1}')
-                neg_flow_compo = vxm.layers.VecInt(method=int_method, name=f'neg_flow_compo_{m + 1}',
-                                                   int_steps=int_steps)(neg_svf_compo)
+                neg_svf = ne.layers.Negate(name=f"neg_svf_{m + 1}")(svf)
+                neg_flow = vxm.layers.VecInt(
+                    method=int_method, name=f"neg_flow_{m + 1}", int_steps=int_steps
+                )(neg_svf)
+                neg_svf_compo = KL.add([neg_svf_0, neg_svf], name=f"neg_svf_compo_{m + 1}")
+                neg_flow_compo = vxm.layers.VecInt(
+                    method=int_method, name=f"neg_flow_compo_{m + 1}", int_steps=int_steps
+                )(neg_svf_compo)
                 if is_neg_jacobian_filter:
-                    neg_flow_compo = layers.NegativeJacobianFiltering2D(filter_shape=(2, 2), sigma=0.7,
-                                                                        pad_size=pad_size,
-                                                                        name=f'neg_flow_compo_njf_{m + 1}')(
-                        neg_flow_compo)
+                    neg_flow_compo = layers.NegativeJacobianFiltering2D(
+                        filter_shape=(2, 2),
+                        sigma=0.7,
+                        pad_size=pad_size,
+                        name=f"neg_flow_compo_njf_{m + 1}",
+                    )(neg_flow_compo)
             else:
                 flow = neg_flow = None
                 pos_flow_compo = pos_flow_0
                 neg_flow_compo = neg_flow_0
 
             warped_subject = vxm.layers.SpatialTransformer(
-                interp_method=interp_method[m], indexing='ij', fill_value=None,
-                name=f'warped_subject_{m + 1}')([tisw_inputs[m], pos_flow_compo])
+                interp_method=interp_method[m],
+                indexing="ij",
+                fill_value=None,
+                name=f"warped_subject_{m + 1}",
+            )([tisw_inputs[m], pos_flow_compo])
 
             if is_softmax_atlas[m]:
-                atlas_softmax = KL.Activation(
-                    'softmax', name=f'atlas_softmax_{m + 1}')(atlas_means[m])
+                atlas_softmax = KL.Activation("softmax", name=f"atlas_softmax_{m + 1}")(
+                    atlas_means[m]
+                )
             else:
                 atlas_softmax = atlas_means[m]
 
-            atlas_loss = layers.create_loss_end([atlas_softmax, warped_subject],
-                                                loss_fn_atlas[m], name=f'loss_atlas_{m + 1}',
-                                                metric_fn=metric_fn_atlas[m],
-                                                metric_name=mn_atlas[m])
+            atlas_loss = layers.create_loss_end(
+                [atlas_softmax, warped_subject],
+                loss_fn_atlas[m],
+                name=f"loss_atlas_{m + 1}",
+                metric_fn=metric_fn_atlas[m],
+                metric_name=mn_atlas[m],
+            )
             small_pos_flows.append(flow)
             pos_flow_compos.append(pos_flow_compo)
             warped_subjects.append(warped_subject)
@@ -592,20 +710,27 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
             atlas_losses.append(atlas_loss)
 
             warped_atlas = vxm.layers.SpatialTransformer(
-                interp_method=interp_method[m], indexing='ij', fill_value=None,
-                name=f'warped_atlas_{m + 1}')([atlas_means[m], neg_flow_compo])
+                interp_method=interp_method[m],
+                indexing="ij",
+                fill_value=None,
+                name=f"warped_atlas_{m + 1}",
+            )([atlas_means[m], neg_flow_compo])
 
             if is_softmax_atlas[m]:
                 warped_atlas_softmax = KL.Activation(
-                    'softmax', name=f'warped_atlas_softmax_{m + 1}')(warped_atlas)
+                    "softmax", name=f"warped_atlas_softmax_{m + 1}"
+                )(warped_atlas)
             else:
                 warped_atlas_softmax = warped_atlas
 
             if is_bidir:
-                subject_loss = layers.create_loss_end([tisw_inputs[m], warped_atlas_softmax],
-                                                      loss_fn_subject[m], name=f'loss_subject_{m + 1}',
-                                                      metric_fn=metric_fn_subject[m],
-                                                      metric_name=mn_subject[m])
+                subject_loss = layers.create_loss_end(
+                    [tisw_inputs[m], warped_atlas_softmax],
+                    loss_fn_subject[m],
+                    name=f"loss_subject_{m + 1}",
+                    metric_fn=metric_fn_subject[m],
+                    metric_name=mn_subject[m],
+                )
             else:
                 subject_loss = None
 
@@ -615,21 +740,35 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
             warped_atlas_softmaxes.append(warped_atlas_softmax)
             subject_losses.append(subject_loss)
 
-        big_warp_loss = layers.create_loss_end([pos_flow_0], loss_fn_big_warp, name='loss_big_warp',
-                                               metric_fn=metric_fn_big_warp,
-                                               metric_name=mn_big_warp)
+        big_warp_loss = layers.create_loss_end(
+            [pos_flow_0],
+            loss_fn_big_warp,
+            name="loss_big_warp",
+            metric_fn=metric_fn_big_warp,
+            metric_name=mn_big_warp,
+        )
         if is_isw:
-            small_pos_flows_cat = KL.concatenate(small_pos_flows, axis=-1, name='small_pos_flows_cat')
-            small_warp_loss = layers.create_loss_end([small_pos_flows_cat],
-                                                     loss_fn_small_warp, name='loss_small_warps',
-                                                     metric_fn=metric_fn_small_warp,
-                                                     metric_name=mn_small_warp)
+            small_pos_flows_cat = KL.concatenate(
+                small_pos_flows, axis=-1, name="small_pos_flows_cat"
+            )
+            small_warp_loss = layers.create_loss_end(
+                [small_pos_flows_cat],
+                loss_fn_small_warp,
+                name="loss_small_warps",
+                metric_fn=metric_fn_small_warp,
+                metric_name=mn_small_warp,
+            )
         else:
             small_warp_loss = None
 
-        mean_stream = ne.layers.MeanStream(name='mean_stream')(pos_flow_0)
-        ms_loss = layers.create_loss_end([mean_stream], loss_fn_ms, name='loss_mean_stream',
-                                         metric_fn=metric_fn_ms, metric_name=mn_ms)
+        mean_stream = ne.layers.MeanStream(name="mean_stream")(pos_flow_0)
+        ms_loss = layers.create_loss_end(
+            [mean_stream],
+            loss_fn_ms,
+            name="loss_mean_stream",
+            metric_fn=metric_fn_ms,
+            metric_name=mn_ms,
+        )
 
         if is_jacobian:
             # positive flows are used, supposed to compute jacobian for flows towards atlas
@@ -637,12 +776,14 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
             # i.e. flow direction is reversed. therefore jacobian is negate of what's expected
             # however, when evaluating jacobian loss, we take care of both expansion and shrinkage,
             # the flow direction should not make a difference
-            pos_flow_stack = layers.Stack(axis=-1, name='pos_flow_stack')(pos_flow_compos)
-            jacobian_loss = layers.create_loss_end([pos_flow_stack],
-                                                   loss_fn_jacobian,
-                                                   name='loss_jacobian',
-                                                   metric_fn=metric_fn_jacobian,
-                                                   metric_name=mn_jacobian)
+            pos_flow_stack = layers.Stack(axis=-1, name="pos_flow_stack")(pos_flow_compos)
+            jacobian_loss = layers.create_loss_end(
+                [pos_flow_stack],
+                loss_fn_jacobian,
+                name="loss_jacobian",
+                metric_fn=metric_fn_jacobian,
+                metric_name=mn_jacobian,
+            )
         else:
             jacobian_loss = None
 
@@ -699,8 +840,9 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
 
     def get_atlas_mean(self, is_cat=True):
         data = [x.get_weights()[0] for x in self.references.mean_layers]
-        data = [x.astype(np.int32) if self.input_type[m] == 'label' else x for m, x in
-                enumerate(data)]
+        data = [
+            x.astype(np.int32) if self.input_type[m] == "label" else x for m, x in enumerate(data)
+        ]
         if is_cat:
             data = np.concatenate(data, axis=-1)
         else:
@@ -725,38 +867,39 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
         a_model = self.references.model_atlas_to_subject
         return self.prebuilt_model_predict(a_model, src, is_cat, batch_size)
 
-    def warp(self, src, img, flow_type, idx=0, interp_method='auto', fill_value=None, batch_size=8):
-        assert idx >= 0 and idx < self.num_inputs, 'idx must be between 0 and the number of inputs'
+    def warp(self, src, img, flow_type, idx=0, interp_method="auto", fill_value=None, batch_size=8):
+        assert idx >= 0 and idx < self.num_inputs, "idx must be between 0 and the number of inputs"
         flow = self.parse_flow_reference(flow_type, idx)
 
-        if flow_type in ['pos', 'to_atlas']:
+        if flow_type in ["pos", "to_atlas"]:
             model_warp = self.references.model_warp_to_atlas[idx]
-        elif flow_type in ['neg', 'to_subject']:
+        elif flow_type in ["neg", "to_subject"]:
             model_warp = self.references.model_warp_to_subject[idx]
-        elif flow_type == 'pos_big':
+        elif flow_type == "pos_big":
             model_warp = self.references.model_big_warp_to_atlas
-        elif flow_type == 'pos_small':
+        elif flow_type == "pos_small":
             model_warp = self.references.model_small_warp_to_atlas[idx]
-        elif flow_type == 'neg_big':
+        elif flow_type == "neg_big":
             model_warp = self.references.model_big_warp_to_subject
-        elif flow_type == 'neg_small':
+        elif flow_type == "neg_small":
             model_warp = self.references.model_small_warp_to_subject[idx]
 
         # cache the model if not done before and the input image shape is the same
         # this avoid building the model every time the function is called
         if (model_warp is None) or (model_warp.inputs[1].shape[1:] != img.shape[1:]):
             img_input = tf.keras.Input(shape=img.shape[1:])
-            if interp_method == 'auto':
-                if self.input_type[idx] == 'float' or self.input_type[idx] == 'prob':
-                    interp_method = 'linear'
+            if interp_method == "auto":
+                if self.input_type[idx] == "float" or self.input_type[idx] == "prob":
+                    interp_method = "linear"
                 else:
-                    interp_method = 'nearest'
+                    interp_method = "nearest"
             else:
-                if not interp_method in ['linear', 'nearest']:
-                    raise ValueError('interp_method must be one of: linear, nearest')
+                if not interp_method in ["linear", "nearest"]:
+                    raise ValueError("interp_method must be one of: linear, nearest")
 
-            st_layer = vxm.layers.SpatialTransformer(interp_method=interp_method,
-                                                     fill_value=fill_value)
+            st_layer = vxm.layers.SpatialTransformer(
+                interp_method=interp_method, fill_value=fill_value
+            )
             img_output = st_layer([img_input, flow])
             if self.is_semi:
                 model_inputs = (self.inputs[0], img_input)
@@ -765,17 +908,17 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
             model_outputs = [img_output]
             model_warp = tf.keras.Model(inputs=model_inputs, outputs=model_outputs)
 
-            if flow_type in ['pos', 'to_atlas']:
+            if flow_type in ["pos", "to_atlas"]:
                 self.references.model_warp_to_atlas[idx] = model_warp
-            elif flow_type in ['neg', 'to_subject']:
+            elif flow_type in ["neg", "to_subject"]:
                 self.references.model_warp_to_subject[idx] = model_warp
-            elif flow_type == 'pos_big':
+            elif flow_type == "pos_big":
                 self.references.model_big_warp_to_atlas = model_warp
-            elif flow_type == 'pos_small':
+            elif flow_type == "pos_small":
                 self.references.model_small_warp_to_atlas[idx] = model_warp
-            elif flow_type == 'neg_big':
+            elif flow_type == "neg_big":
                 self.references.model_big_warp_to_subject = model_warp
-            elif flow_type == 'neg_small':
+            elif flow_type == "neg_small":
                 self.references.model_small_warp_to_subject[idx] = model_warp
 
         if isinstance(src, (list, tuple)):
@@ -795,21 +938,29 @@ class JointSphereMorphWithAtlasBuildingV3(ne.modelio.LoadableModel):
         return self.prebuilt_model_predict(a_model, src, is_cat=False)
 
     def parse_flow_reference(self, flow_type, idx):
-        if flow_type not in ['pos', 'to_atlas', 'neg', 'to_subject',
-                             'pos_big', 'pos_small', 'neg_big', 'neg_small']:
-            raise ValueError('flow_type must be one of: pos, to_atlas, neg, to_subject')
+        if flow_type not in [
+            "pos",
+            "to_atlas",
+            "neg",
+            "to_subject",
+            "pos_big",
+            "pos_small",
+            "neg_big",
+            "neg_small",
+        ]:
+            raise ValueError("flow_type must be one of: pos, to_atlas, neg, to_subject")
 
-        if flow_type in ['pos', 'to_atlas']:
+        if flow_type in ["pos", "to_atlas"]:
             flow = self.references.pos_flow_compos[idx]
-        elif flow_type in ['neg', 'to_subject']:
+        elif flow_type in ["neg", "to_subject"]:
             flow = self.references.neg_flow_compos[idx]
-        elif flow_type == 'pos_big':
+        elif flow_type == "pos_big":
             flow = self.references.pos_flow_0
-        elif flow_type == 'pos_small':
+        elif flow_type == "pos_small":
             flow = self.references.small_pos_flows[idx]
-        elif flow_type == 'neg_big':
+        elif flow_type == "neg_big":
             flow = self.references.neg_flow_0
-        elif flow_type == 'neg_small':
+        elif flow_type == "neg_small":
             flow = self.references.small_neg_flows[idx]
         return flow
 
@@ -857,19 +1008,22 @@ class VxmDenseWithPositionalEncoding(ne.modelio.LoadableModel):
     """
 
     @ne.modelio.store_config_args
-    def __init__(self, inshape,
-                 input_model=None,
-                 src_feats=1,
-                 trg_feats=1,
-                 npos=None,
-                 pad_size=0,
-                 bidir=False,
-                 name='vxm_dense_pe',
-                 **kwargs):
+    def __init__(
+        self,
+        inshape,
+        input_model=None,
+        src_feats=1,
+        trg_feats=1,
+        npos=None,
+        pad_size=0,
+        bidir=False,
+        name="vxm_dense_pe",
+        **kwargs,
+    ):
 
         if input_model is None:
-            source = tf.keras.Input(shape=(*inshape, src_feats), name='%s_source_input' % name)
-            target = tf.keras.Input(shape=(*inshape, trg_feats), name='%s_target_input' % name)
+            source = tf.keras.Input(shape=(*inshape, src_feats), name="%s_source_input" % name)
+            target = tf.keras.Input(shape=(*inshape, trg_feats), name="%s_target_input" % name)
             input_model = tf.keras.Model(inputs=[source, target], outputs=[source, target])
         else:
             source, target = input_model.outputs[:2]
@@ -882,14 +1036,16 @@ class VxmDenseWithPositionalEncoding(ne.modelio.LoadableModel):
         vxm_model = vxm.networks.VxmDense(inshape, input_model=input_model, bidir=bidir, **kwargs)
 
         pos_flow = vxm_model.references.pos_flow
-        y_source = vxm.layers.SpatialTransformer(interp_method='linear',
-                                                 name=f'pos_transformer')([source, pos_flow])
+        y_source = vxm.layers.SpatialTransformer(interp_method="linear", name="pos_transformer")(
+            [source, pos_flow]
+        )
         outputs = [y_source]
 
         if bidir:
             neg_flow = vxm_model.references.neg_flow
-            y_target = vxm.layers.SpatialTransformer(interp_method='linear',
-                                                     name=f'neg_transformer')([target, neg_flow])
+            y_target = vxm.layers.SpatialTransformer(
+                interp_method="linear", name="neg_transformer"
+            )([target, neg_flow])
             outputs.append(y_target)
 
         super().__init__(inputs=input_model.inputs, outputs=outputs)
